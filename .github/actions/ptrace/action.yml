@@ -9,4 +9,12 @@ runs:
       working-directory: ${{ github.workspace }}/kernel/common
       run: |
         set -euo pipefail
-        patch -p1 -F 3 < "${{ github.workspace }}/kernel_patches/gki_ptrace.patch"
+
+        # Si el parche ya esta aplicado en la fuente, lo omite sin error.
+        P="${{ github.workspace }}/kernel_patches/gki_ptrace.patch"
+        if patch -p1 -F 3 -R --dry-run -s < "$P" >/dev/null 2>&1; then
+          echo "[=] Ptrace ya aplicado, omito"
+        else
+          echo "[+] Aplicando gki_ptrace.patch"
+          patch -p1 -F 3 --forward < "$P"
+        fi
