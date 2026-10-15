@@ -1,0 +1,12 @@
+name: 'Apply Ptrace Patch'
+description: 'GKI ptrace compatibility patch (kernels < 5.16)'
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Apply Ptrace Patch
+      shell: bash
+      working-directory: ${{ github.workspace }}/kernel/common
+      run: |
+        set -euo pipefail
+        patch -p1 -F 3 < "${{ github.workspace }}/kernel_patches/gki_ptrace.patch"

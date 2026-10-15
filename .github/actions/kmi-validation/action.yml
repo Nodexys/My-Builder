@@ -1,0 +1,36 @@
+name: 'KMI validation toggle'
+description: 'enabled=true keeps the stock module symbol (CRC) check; enabled=false makes the kernel load modules even when symbol CRCs disagree'
+
+inputs:
+  enabled:
+    description: 'true = validación normal, false = ignorar diferencias de CRC'
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      working-directory: ${{ github.workspace }}/kernel/common
+      env:
+        ENABLED: ${{ inputs.enabled }}
+      run: |
+        set -euo pipefail
+        if [ "$ENABLED" = "true" ]; then
+          echo "[*] Validación KMI activa (comportamiento normal del kernel)."
+          exit 0
+        fi
+        python3 - <<'PY'
+        import re, sys
+        p = 'kernel/module.c'
+        s = open(p, encoding='utf-8').read()
+        if 'but ignore' in s:
+            print("[+] El kernel ya ignora diferencias de CRC (parche incluido en la fuente).")
+            sys.exit(0)
+        pat = re.compile(r'(bad_version:\s*pr_warn\("%s: disagrees about version of symbol %s)\\n",(\s*info->name, symname\);\s*)return 0;')
+        new, n = pat.subn(r'\1, but ignore...\\n",\2return 1;', s, count=1)
+        if n != 1:
+            print("::error::No pude modificar kernel/module.c (check_version cambió). Deja kmi_validation activado o dime el contenido de check_version.")
+            sys.exit(1)
+        open(p, 'w', encoding='utf-8').write(new)
+        print("[+] Validación KMI desactivada: los módulos cargan aunque los CRC no coincidan.")
+        PY

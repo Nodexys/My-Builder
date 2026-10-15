@@ -1,0 +1,33 @@
+name: 'Custom Kernel Config'
+description: 'Overlay custom.config (and/or an inline list) on top of gki_defconfig, or verify it against the final .config'
+inputs:
+  mode:
+    description: 'apply (before the build) or verify (after the build)'
+    required: true
+  file:
+    description: 'Path of the custom config file, relative to the repo root'
+    required: false
+    default: 'custom.config'
+  extra:
+    description: 'Extra configs, separated by spaces (e.g. "CONFIG_FOO=y CONFIG_BAR=n")'
+    required: false
+    default: ''
+
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      env:
+        MODE: ${{ inputs.mode }}
+        CFG_FILE: ${{ inputs.file }}
+        CFG_EXTRA: ${{ inputs.extra }}
+      run: |
+        set -euo pipefail
+        if [ "$MODE" = "apply" ]; then
+          python3 "${{ github.action_path }}/custom_config.py" apply \
+            "${{ github.workspace }}/kernel/common/arch/arm64/configs/gki_defconfig" \
+            "${{ github.workspace }}/${CFG_FILE}" "$CFG_EXTRA"
+        else
+          python3 "${{ github.action_path }}/custom_config.py" verify auto \
+            "${{ github.workspace }}/${CFG_FILE}" "$CFG_EXTRA"
+        fi

@@ -1,0 +1,537 @@
+name: Nodexys Kernel Builder
+
+# Compila el kernel de github.com/Nodexys/Kernel-Source con KernelSU-Next + SUSFS (y extras).
+# Uso: pestaña "Actions" -> "Nodexys Kernel Builder" -> "Run workflow".
+# Todo se baja de GitHub: no se usa nada de los servidores de Google.
+
+permissions:
+  contents: write
+
+concurrency:
+  group: nodexys-build-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  # --- Lo único que tendrías que cambiar si algún día cambias de repo ----------
+  KERNEL_SOURCE_REPO: https://github.com/Nodexys/Kernel-Source.git
+  # Parches extra (ntsync, bbrv3, ptrace, unicode, performance).
+  KERNEL_PATCHES_REPO: https://github.com/WildKernels/kernel_patches.git
+  # Base de AnyKernel3 (se le superpone la carpeta anykernel/ de este repo).
+  AK3_REPO: https://github.com/osm0sis/AnyKernel3.git
+  AK3_BRANCH: master
+  # -------------------------------------------------------------------------------
+
+on:
+  workflow_dispatch:
+    inputs:
+      # ---------------- 1. FUENTE Y COMPILADOR ----------------
+      source_branch:
+        description: "[1 Fuente] Rama de Nodexys/Kernel-Source (vacío = la rama principal)"
+        type: string
+        default: ""
+      clang:
+        description: "[2 Compilador] Clang 12, Clang 19, o los dos a la vez (genera 2 kernels)"
+        type: choice
+        default: "Clang 19"
+        options:
+          - "Clang 19"
+          - "Clang 12"
+          - "All (Clang 12 + Clang 19)"
+      lto:
+        description: "[2 Compilador] LTO: 'Del defconfig' = no tocar. thin = rápido, full = más optimizado y lento"
+        type: choice
+        default: "Del defconfig"
+        options:
+          - "Del defconfig"
+          - "thin"
+          - "full"
+          - "ninguno"
+      # ---------------- 2. ROOT ----------------
+      root:
+        description: "[3 Root] KernelSU-Next o Sin root (vanilla)"
+        type: choice
+        default: "KernelSU-Next"
+        options:
+          - "KernelSU-Next"
+          - "Sin root (vanilla)"
+      use_susfs:
+        description: "[3 Root] SUSFS (oculta el root). Solo funciona con KernelSU-Next"
+        type: boolean
+        default: true
+      use_nomount:
+        description: "[3 Root] NoMount (también genera el metamódulo para instalar)"
+        type: boolean
+        default: true
+      # ---------------- 3. EXTRAS ----------------
+      use_ntsync:
+        description: "[4 Extras] NTSync (sincronización de Windows/Wine)"
+        type: boolean
+        default: true
+      use_net:
+        description: "[4 Extras] Networking (IPSet, BBRv3, CIFS, WireGuard...)"
+        type: boolean
+        default: true
+      use_perf:
+        description: "[4 Extras] Parches de rendimiento (experimentales)"
+        type: boolean
+        default: false
+      use_ds:
+        description: "[4 Extras] DroidSpaces (contenedores / userspace Linux)"
+        type: boolean
+        default: true
+      use_bbg:
+        description: "[4 Extras] Baseband Guard"
+        type: boolean
+        default: true
+      use_bpf:
+        description: "[4 Extras] BPF (BTF + eBPF + FUSE-BPF)"
+        type: boolean
+        default: true
+      use_ptrace:
+        description: "[4 Extras] Parche Ptrace (arregla fuga de SUSFS)"
+        type: boolean
+        default: true
+      use_unicode:
+        description: "[4 Extras] Parche Unicode (arregla bypass)"
+        type: boolean
+        default: true
+      # ---------------- 4. KMI ----------------
+      kmi_validation:
+        description: "[5 KMI] ON = normal (rechaza módulos con símbolos distintos). OFF = los carga igual"
+        type: boolean
+        default: true
+      # ---------------- 5. NOMBRE Y CONFIGS ----------------
+      brand_name:
+        description: "[6 Nombre] Nombre en el banner del zip y en el nombre del archivo"
+        type: string
+        default: "Nodexys"
+      uname_suffix:
+        description: "[6 Nombre] Texto para uname -r (ej: Nodexys). Vacío = dejar la versión del defconfig"
+        type: string
+        default: ""
+      extra_configs:
+        description: "[7 Configs] Configs sueltas separadas por espacio (ej: CONFIG_FOO=y CONFIG_BAR=n). Se suman a custom.config"
+        type: string
+        default: ""
+      extra_make_args:
+        description: "[8 Avanzado] Argumentos extra para make (ej: KCFLAGS=-Wno-error)"
+        type: string
+        default: ""
+      commit_mode:
+        description: "[8 Avanzado] verified = versiones probadas (recomendado), latest = lo más nuevo de cada repo"
+        type: choice
+        default: verified
+        options:
+          - verified
+          - latest
+      use_cache:
+        description: "[8 Avanzado] Usar caché (compila más rápido la próxima vez)"
+        type: boolean
+        default: true
+      create_release:
+        description: "[9 Salida] Publicar el zip en la sección Releases"
+        type: boolean
+        default: false
+
+jobs:
+  # =========================================================================
+  # PLAN: valida opciones y resuelve versiones (una sola vez para todos)
+  # =========================================================================
+  plan:
+    name: "Preparar"
+    runs-on: ubuntu-latest
+    outputs:
+      clangs: ${{ steps.p.outputs.clangs }}
+      first_clang: ${{ steps.p.outputs.first_clang }}
+      flavor: ${{ steps.p.outputs.flavor }}
+      label: ${{ steps.p.outputs.label }}
+      susfs: ${{ steps.p.outputs.susfs }}
+      root_commit: ${{ steps.p.outputs.root_commit }}
+      susfs_commit: ${{ steps.p.outputs.susfs_commit }}
+      nomount_commit: ${{ steps.p.outputs.nomount_commit }}
+    steps:
+    - name: Validar opciones y resolver commits
+      id: p
+      shell: bash
+      env:
+        CLANG_IN: ${{ inputs.clang }}
+        ROOT_IN: ${{ inputs.root }}
+        SUSFS_IN: ${{ inputs.use_susfs }}
+        BRAND_IN: ${{ inputs.brand_name }}
+        SUFFIX_IN: ${{ inputs.uname_suffix }}
+        BRANCH_IN: ${{ inputs.source_branch }}
+        MAKE_IN: ${{ inputs.extra_make_args }}
+        MODE: ${{ inputs.commit_mode }}
+      run: |
+        set -euo pipefail
+
+        bad() { echo "::error::$1" >&2; exit 1; }
+        [[ "$BRAND_IN"  =~ ^[A-Za-z0-9._+-]+$ ]]    || bad "brand_name: solo letras, números y . _ + - (y no puede estar vacío)"
+        [[ "$SUFFIX_IN" =~ ^[A-Za-z0-9._+-]*$ ]]    || bad "uname_suffix: solo letras, números y . _ + -"
+        [[ "$BRANCH_IN" =~ ^[A-Za-z0-9._/+-]*$ ]]   || bad "source_branch: nombre de rama no válido"
+        [[ "$MAKE_IN"   =~ ^[A-Za-z0-9_=./:+,\ -]*$ ]] || bad "extra_make_args: caracteres no permitidos"
+
+        case "$CLANG_IN" in
+          "Clang 19") M='["19"]'; FIRST=19 ;;
+          "Clang 12") M='["12"]'; FIRST=12 ;;
+          *)          M='["12","19"]'; FIRST=12 ;;
+        esac
+
+        case "$ROOT_IN" in
+          "KernelSU-Next") FLAVOR=next; LABEL=KernelSU-Next ;;
+          *)               FLAVOR=none; LABEL=Vanilla ;;
+        esac
+
+        SUSFS="$SUSFS_IN"
+        if [ "$FLAVOR" = "none" ] && [ "$SUSFS" = "true" ]; then
+          echo "::warning::SUSFS necesita KernelSU-Next; se desactiva porque elegiste 'Sin root'."
+          SUSFS=false
+        fi
+
+        retry() { local n=0; until [ "$n" -ge 5 ]; do "$@" && return 0; n=$((n+1)); sleep 5; done; return 1; }
+        resolve_sha() { retry git ls-remote "$1" "$2" | awk '{print $1; exit}'; }
+        emit() {
+          [[ "${2:-}" =~ ^[0-9a-f]{40}$ ]] || bad "No pude resolver $1 (got: ${2:-vacío})"
+          echo "$1=$2" >> "$GITHUB_OUTPUT"
+        }
+
+        # Versión probada de NoMount (con 'latest' se usa la punta de su rama dev)
+        PIN_NOMOUNT="5a610db7649a59eb3e3d710653618d594941f8da"
+        if [ "$MODE" = "verified" ]; then NOMOUNT="$PIN_NOMOUNT"; else NOMOUNT="$(resolve_sha https://github.com/maxsteeel/nomount.git refs/heads/dev)"; fi
+        emit nomount_commit "$NOMOUNT"
+
+        if [ "$FLAVOR" = "next" ]; then
+          if [ "$SUSFS" = "true" ]; then
+            emit root_commit "$(resolve_sha https://github.com/pershoot/KernelSU-Next.git refs/heads/dev-susfs)"
+          else
+            emit root_commit "$(resolve_sha https://github.com/KernelSU-Next/KernelSU-Next.git refs/heads/dev)"
+          fi
+        fi
+        if [ "$SUSFS" = "true" ]; then
+          emit susfs_commit "$(resolve_sha https://gitlab.com/simonpunk/susfs4ksu.git refs/heads/gki-android12-5.10)"
+        fi
+
+        {
+          echo "clangs=$M"
+          echo "first_clang=$FIRST"
+          echo "flavor=$FLAVOR"
+          echo "label=$LABEL"
+          echo "susfs=$SUSFS"
+        } >> "$GITHUB_OUTPUT"
+
+  # =========================================================================
+  # BUILD: un trabajo por cada versión de clang elegida
+  # =========================================================================
+  build:
+    name: "Kernel con Clang ${{ matrix.clang }}"
+    needs: plan
+    runs-on: ubuntu-22.04
+    timeout-minutes: 150
+    strategy:
+      fail-fast: false
+      matrix:
+        clang: ${{ fromJSON(needs.plan.outputs.clangs) }}
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v7
+
+    # ---------------------------------------------------------------- Runner
+    - name: Liberar espacio en disco
+      uses: endersonmenezes/free-disk-space@v4
+      with:
+        remove_android: true
+        remove_dotnet: true
+        remove_haskell: true
+        remove_tool_cache: true
+        remove_swap: true
+        remove_packages: "azure-cli google-cloud-cli microsoft-edge-stable google-chrome-stable firefox postgresql* temurin-* mysql* dotnet-sdk-*"
+        remove_packages_one_command: true
+        remove_folders: "/usr/share/swift /usr/share/miniconda /usr/share/az* /usr/local/lib/node_modules /usr/local/share/chromium /usr/local/share/powershell /usr/local/julia /usr/local/aws-cli /usr/local/aws-sam-cli /usr/share/gradle"
+        rm_cmd: "rmz"
+        rmz_version: "3.2.0"
+        testing: false
+
+    - name: Swap extra (para LTO)
+      uses: pierotofy/set-swap-space@master
+      with:
+        swap-size-gb: 16
+
+    - name: Instalar compilador (Clang ${{ matrix.clang }})
+      uses: ./.github/actions/setup-build-environment
+      with:
+        clang_version: ${{ matrix.clang }}
+        kernel_patches_repo: ${{ env.KERNEL_PATCHES_REPO }}
+
+    # ---------------------------------------------------------------- Fuente
+    - name: Descargar el kernel desde GitHub
+      uses: ./.github/actions/download-kernel
+      with:
+        source_repo: ${{ env.KERNEL_SOURCE_REPO }}
+        source_branch: ${{ inputs.source_branch }}
+
+    - name: Nombre del archivo
+      shell: bash
+      env:
+        LABEL: ${{ needs.plan.outputs.label }}
+        BRAND: ${{ inputs.brand_name }}
+      run: echo "FILE_NAME=${BRAND}-${LABEL}-5.10.${SUBLEVEL}-clang${{ matrix.clang }}" >> "$GITHUB_ENV"
+
+    # ---------------------------------------------------------------- Root + SUSFS
+    - name: Integrar KernelSU-Next
+      if: needs.plan.outputs.flavor == 'next'
+      uses: ./.github/actions/root-setup
+      with:
+        flavor: ${{ needs.plan.outputs.flavor }}
+        commit: ${{ needs.plan.outputs.root_commit }}
+
+    - name: SUSFS
+      if: needs.plan.outputs.susfs == 'true'
+      uses: ./.github/actions/susfs
+      with:
+        susfs_commit: ${{ needs.plan.outputs.susfs_commit }}
+        sublevel: ${{ env.SUBLEVEL }}
+        root_flavor: ${{ needs.plan.outputs.flavor }}
+
+    # ---------------------------------------------------------------- Extras
+    - name: Baseband Guard
+      if: inputs.use_bbg
+      uses: ./.github/actions/bbg
+
+    - name: Networking
+      if: inputs.use_net
+      uses: ./.github/actions/networking
+
+    - name: DroidSpaces
+      if: inputs.use_ds
+      uses: ./.github/actions/droidspaces
+
+    - name: NTSync
+      if: inputs.use_ntsync
+      uses: ./.github/actions/ntsync
+      with:
+        sublevel: ${{ env.SUBLEVEL }}
+
+    - name: Parche Ptrace
+      if: inputs.use_ptrace
+      uses: ./.github/actions/ptrace
+
+    - name: Parche Unicode
+      if: inputs.use_unicode
+      uses: ./.github/actions/unicode-fix
+
+    - name: Parches de rendimiento
+      if: inputs.use_perf
+      uses: ./.github/actions/performance
+
+    - name: Configs varias
+      uses: ./.github/actions/misc
+
+    - name: BPF (BTF + eBPF + FUSE-BPF)
+      if: inputs.use_bpf
+      uses: ./.github/actions/btf
+      with:
+        sublevel: ${{ env.SUBLEVEL }}
+
+    - name: NoMount
+      if: inputs.use_nomount
+      uses: ./.github/actions/nomount
+      with:
+        commit: ${{ needs.plan.outputs.nomount_commit }}
+
+    # ---------------------------------------------------------------- KMI + tus cosas
+    - name: Validación KMI (${{ inputs.kmi_validation && 'activa' || 'desactivada' }})
+      uses: ./.github/actions/kmi-validation
+      with:
+        enabled: ${{ inputs.kmi_validation }}
+
+    - name: Tus parches (patches/custom) y hook (hooks/pre-build.sh)
+      uses: ./.github/actions/custom-patches
+
+    - name: Ajustes del menú (LTO y versión)
+      id: menu
+      shell: bash
+      env:
+        LTO: ${{ inputs.lto }}
+        SUFFIX: ${{ inputs.uname_suffix }}
+      run: |
+        set -euo pipefail
+        F="${{ github.workspace }}/.workflow.config"
+        : > "$F"
+        case "$LTO" in
+          thin)    printf '%s\n' 'CONFIG_LTO_CLANG_THIN=y' '# CONFIG_LTO_CLANG_FULL is not set' >> "$F" ;;
+          full)    printf '%s\n' 'CONFIG_LTO_CLANG_FULL=y' '# CONFIG_LTO_CLANG_THIN is not set' >> "$F" ;;
+          ninguno) printf '%s\n' 'CONFIG_LTO_NONE=y' '# CONFIG_LTO_CLANG_THIN is not set' '# CONFIG_LTO_CLANG_FULL is not set' >> "$F" ;;
+        esac
+        if [ -n "$SUFFIX" ]; then
+          printf '%s\n' "CONFIG_LOCALVERSION=\"-${SUFFIX}\"" '# CONFIG_LOCALVERSION_AUTO is not set' >> "$F"
+        fi
+        echo "Ajustes del menú:"; cat "$F" || true
+
+    - name: Aplicar ajustes del menú
+      uses: ./.github/actions/custom-config
+      with:
+        mode: apply
+        file: .workflow.config
+
+    - name: Aplicar TUS configs (custom.config + extra_configs)
+      uses: ./.github/actions/custom-config
+      with:
+        mode: apply
+        file: custom.config
+        extra: ${{ inputs.extra_configs }}
+
+    - name: Buscar parches rechazados
+      if: always()
+      uses: ./.github/actions/scan-patch-rejects
+
+    - name: Subir parches rechazados (si hay)
+      if: always()
+      uses: actions/upload-artifact@v7
+      with:
+        name: ${{ env.FILE_NAME || 'build' }}-Rejects
+        path: patch-rejects/
+        if-no-files-found: ignore
+
+    # ---------------------------------------------------------------- Compilar
+    - name: Restaurar caché
+      if: inputs.use_cache
+      uses: actions/cache@v6
+      with:
+        path: /home/runner/.ccache
+        key: ccache-nodexys-clang${{ matrix.clang }}-${{ github.run_id }}
+        restore-keys: |
+          ccache-nodexys-clang${{ matrix.clang }}-
+
+    - name: Preparar AnyKernel3 (${{ inputs.brand_name }})
+      uses: ./.github/actions/prepare-anykernel
+      with:
+        base_repo: ${{ env.AK3_REPO }}
+        base_branch: ${{ env.AK3_BRANCH }}
+        brand_name: ${{ inputs.brand_name }}
+
+    - name: Reiniciar estadísticas de ccache
+      shell: bash
+      run: ccache -z || true
+
+    - name: Compilar kernel (puede tardar 30-90 min)
+      uses: ./.github/actions/build-kernel
+      env:
+        KBUILD_BUILD_USER: ${{ inputs.brand_name }}
+        KBUILD_BUILD_HOST: github-actions
+      with:
+        clang_version: ${{ matrix.clang }}
+        extra_make_args: ${{ inputs.extra_make_args }}
+
+    - name: Estadísticas de ccache
+      if: always() && inputs.use_cache
+      shell: bash
+      run: |
+        ccache -s 2>/dev/null | head -20 || true
+        ccache -c 2>/dev/null || true
+
+    - name: Verificar tus configs en el kernel final
+      uses: ./.github/actions/custom-config
+      with:
+        mode: verify
+        file: custom.config
+        extra: ${{ inputs.extra_configs }}
+
+    # ---------------------------------------------------------------- Empaquetar
+    - name: Rellenar banner de AnyKernel3
+      id: finish
+      shell: bash
+      env:
+        ROOT_LABEL: ${{ needs.plan.outputs.label }}
+        SUSFS: ${{ needs.plan.outputs.susfs }}
+      run: |
+        set -euo pipefail
+        IMG="${{ github.workspace }}/AnyKernel3/Image"
+        KVER="$(strings "$IMG" | grep -m1 '^Linux version ' | awk '{print $3}' || true)"
+        [ -z "$KVER" ] && KVER="5.10.${SUBLEVEL}"
+        DATE="$(date -u +%Y-%m-%d)"
+        FEATURES="Clang${{ matrix.clang }}"
+        [ "$SUSFS" = "true" ] && FEATURES="$FEATURES SUSFS"
+        [ "${{ inputs.use_nomount }}" = "true" ] && FEATURES="$FEATURES NoMount"
+        [ "${{ inputs.use_ntsync }}" = "true" ] && FEATURES="$FEATURES NTSync"
+        [ "${{ inputs.use_net }}" = "true" ] && FEATURES="$FEATURES Net"
+        [ "${{ inputs.use_perf }}" = "true" ] && FEATURES="$FEATURES Perf"
+        [ "${{ inputs.use_ds }}" = "true" ] && FEATURES="$FEATURES DroidSpaces"
+        [ "${{ inputs.use_bbg }}" = "true" ] && FEATURES="$FEATURES BBG"
+        [ "${{ inputs.use_bpf }}" = "true" ] && FEATURES="$FEATURES BPF"
+        [ "${{ inputs.kmi_validation }}" = "false" ] && FEATURES="$FEATURES NoKMI"
+        for f in "${{ github.workspace }}/AnyKernel3/anykernel.sh" "${{ github.workspace }}/AnyKernel3/banner"; do
+          [ -f "$f" ] || continue
+          sed -i -e "s|@KVER@|${KVER}|g" -e "s|@ROOT@|${ROOT_LABEL}|g" -e "s|@DATE@|${DATE}|g" -e "s|@FEATURES@|${FEATURES}|g" "$f"
+        done
+        echo "kver=$KVER" >> "$GITHUB_OUTPUT"
+        echo "features=$FEATURES" >> "$GITHUB_OUTPUT"
+        echo "Kernel: $KVER"
+
+    - name: Subir kernel (zip flasheable)
+      uses: actions/upload-artifact@v7
+      with:
+        name: ${{ env.FILE_NAME }}-AnyKernel3
+        path: ${{ github.workspace }}/AnyKernel3/**
+        if-no-files-found: error
+        compression-level: 9
+
+    - name: Metamódulo NoMount
+      if: inputs.use_nomount && matrix.clang == needs.plan.outputs.first_clang
+      id: nomount_module
+      uses: ./.github/actions/nomount-metamodule
+      with:
+        commit: ${{ needs.plan.outputs.nomount_commit }}
+
+    - name: Subir metamódulo NoMount
+      if: inputs.use_nomount && matrix.clang == needs.plan.outputs.first_clang
+      uses: actions/upload-artifact@v7
+      with:
+        name: NoMount-Metamodule
+        path: ${{ steps.nomount_module.outputs.module_dir }}
+        if-no-files-found: error
+        compression-level: 0
+
+    # ---------------------------------------------------------------- Release (opcional)
+    - name: Publicar en Releases
+      if: inputs.create_release
+      shell: bash
+      env:
+        GH_TOKEN: ${{ github.token }}
+        KVER: ${{ steps.finish.outputs.kver }}
+        FEATURES: ${{ steps.finish.outputs.features }}
+        ROOT_LABEL: ${{ needs.plan.outputs.label }}
+      run: |
+        set -euo pipefail
+        (cd AnyKernel3 && zip -r -q -9 "../${FILE_NAME}.zip" .)
+        ASSETS=("${FILE_NAME}.zip")
+        if [ "${{ inputs.use_nomount }}" = "true" ] && [ "${{ matrix.clang }}" = "${{ needs.plan.outputs.first_clang }}" ] && [ -f "${{ steps.nomount_module.outputs.module_path }}" ]; then
+          cp "${{ steps.nomount_module.outputs.module_path }}" "NoMount-Metamodule.zip"
+          ASSETS+=("NoMount-Metamodule.zip")
+        fi
+        TAG="nodexys-${GITHUB_RUN_NUMBER}"
+        printf '## %s Kernel\n\n| | |\n|---|---|\n| Kernel | `%s` |\n| Root | %s |\n| Extras | %s |\n\nHaz backup de `boot` antes de flashear.\n' \
+          "${{ inputs.brand_name }}" "${KVER}" "${ROOT_LABEL}" "${FEATURES}" > release_notes.md
+        # Con "All" dos trabajos llegan aquí a la vez: el que llegue segundo solo sube su archivo.
+        gh release view "$TAG" >/dev/null 2>&1 || gh release create "$TAG" --title "${{ inputs.brand_name }} Kernel ${KVER}" --notes-file release_notes.md >/dev/null 2>&1 || true
+        gh release upload "$TAG" "${ASSETS[@]}" --clobber
+
+    # ---------------------------------------------------------------- Resumen
+    - name: Resumen
+      if: always()
+      shell: bash
+      run: |
+        {
+          echo "## ${{ inputs.brand_name }} Kernel · Clang ${{ matrix.clang }}"
+          echo
+          echo "| | |"
+          echo "|---|---|"
+          echo "| Estado | ${{ job.status }} |"
+          echo "| Archivo | \`${FILE_NAME:-?}\` |"
+          echo "| Kernel | \`${{ steps.finish.outputs.kver }}\` |"
+          echo "| Root | ${{ needs.plan.outputs.label }} |"
+          echo "| Extras | ${{ steps.finish.outputs.features }} |"
+          echo "| KMI | ${{ inputs.kmi_validation && 'validación normal' || 'ignora CRC de módulos' }} |"
+          echo "| Commit del kernel | \`${KERNEL_SOURCE_COMMIT:-?}\` |"
+          echo
+          echo "Descarga el artifact **${FILE_NAME:-...}-AnyKernel3** (abajo en esta página) y flashéalo con Kernel Flasher."
+        } >> "$GITHUB_STEP_SUMMARY"

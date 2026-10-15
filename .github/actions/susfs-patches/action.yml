@@ -1,0 +1,48 @@
+name: 'Apply SUSFS Patches'
+description: 'Copy SUSFS sources and apply the android12-5.10 patch (+ temporary "fake" fixes for old sublevels)'
+inputs:
+  sublevel:
+    description: 'Kernel sublevel'
+    required: true
+
+runs:
+  using: "composite"
+  steps:
+    - name: Copy SUSFS sources
+      shell: bash
+      working-directory: ${{ github.workspace }}/kernel/common
+      run: |
+        set -euo pipefail
+        cp "${{ github.workspace }}/susfs4ksu/kernel_patches/fs/"* fs/
+        cp "${{ github.workspace }}/susfs4ksu/kernel_patches/include/linux/"* include/linux/
+        cp "${{ github.workspace }}/susfs4ksu/kernel_patches/50_add_susfs_in_gki-android12-5.10.patch" ./
+
+    - name: Apply android12-5.10 fake patches (old sublevels)
+      shell: bash
+      working-directory: ${{ github.workspace }}/kernel/common
+      run: |
+        if [ "${{ inputs.sublevel }}" -le 43 ]; then
+          echo "Applying base.c fake patch"
+          perl -i -pe 's/(int|size_t)\s+this_len\s*=\s*min_t\s*\(\s*\1\s*,/size_t this_len = min_t(size_t,/;' fs/proc/base.c
+        fi
+        if [ "${{ inputs.sublevel }}" -le 117 ]; then
+          echo "Applying fdinfo.c fake patch"
+          perl -0777 -i -pe 's{(if \(inode\) \{\n)\t\t/\*\n(\t\t \*[^\n]*\n)+\t\t \*/\n}{$1}g; s{^[[:space:]]*u32 mask = mark->mask & IN_ALL_EVENTS;\n}{}m' fs/notify/fdinfo.c
+          perl -i -pe 's/\bmask,\s*mark->ignored_mask/inotify_mark_user_mask(mark)/g' fs/notify/fdinfo.c
+          perl -i -pe 's/ignored_mask:%x/ignored_mask:0/g' fs/notify/fdinfo.c
+          python3 -c 'import re;c=open("fs/notify/fdinfo.c").read();c=re.sub(r"^static void inotify_fdinfo\(struct seq_file \*m, struct fsnotify_mark \*mark\)$",lambda m:"static inline u32 inotify_mark_user_mask(struct fsnotify_mark *mark)\n{\n\treturn mark->mask & IN_ALL_EVENTS;\n}\n\n"+m.group(0),c,count=1,flags=re.MULTILINE);open("fs/notify/fdinfo.c","w").write(c)'
+        fi
+
+    - name: Apply SUSFS kernel patch
+      shell: bash
+      working-directory: ${{ github.workspace }}/kernel/common
+      run: |
+        set -euo pipefail
+        patch -p1 < 50_add_susfs_in_gki-android12-5.10.patch
+
+        # SUSFS OPEN_REDIRECT calls VMA_PAD_START(), which older patch levels
+        # (before Google's page-size-migration feature) do not have.
+        if grep -q 'VMA_PAD_START(' fs/proc/task_mmu.c && ! grep -qE '#include <linux/pgsize_migration(_inline)?\.h>|define VMA_PAD_START' fs/proc/task_mmu.c; then
+          sed -i '1a #ifndef VMA_PAD_START\n#define VMA_PAD_START(vma) ((vma)->vm_end)\n#endif' fs/proc/task_mmu.c
+          echo "Added VMA_PAD_START fallback to fs/proc/task_mmu.c"
+        fi

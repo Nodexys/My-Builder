@@ -1,0 +1,27 @@
+name: 'Custom patches and hook'
+description: 'Apply patches/custom/*.patch (alphabetical) and run hooks/pre-build.sh if present'
+
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      working-directory: ${{ github.workspace }}/kernel/common
+      run: |
+        set -euo pipefail
+        shopt -s nullglob
+        PATCHES=( "${{ github.workspace }}/patches/custom/"*.patch )
+        if [ "${#PATCHES[@]}" -gt 0 ]; then
+          echo "[*] Aplicando ${#PATCHES[@]} parche(s) de patches/custom/"
+          for p in "${PATCHES[@]}"; do
+            echo "   -> $(basename "$p")"
+            git apply --whitespace=nowarn "$p" || { echo "::error::No aplicó $(basename "$p")" >&2; exit 1; }
+          done
+        else
+          echo "[*] patches/custom/ vacío, nada que aplicar."
+        fi
+
+        HOOK="${{ github.workspace }}/hooks/pre-build.sh"
+        if [ -f "$HOOK" ]; then
+          echo "[*] Ejecutando hooks/pre-build.sh"
+          KERNEL_DIR="$PWD" bash "$HOOK"
+        fi

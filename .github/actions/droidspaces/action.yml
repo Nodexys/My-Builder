@@ -1,0 +1,54 @@
+name: Setup Droidspaces-OSS
+description: Clone Droidspaces-OSS and apply the android12-5.10 kernel patches + configs
+inputs:
+  droidspaces_commit:
+    description: 'Pinned Droidspaces-OSS commit (empty = main tip)'
+    required: false
+    default: ''
+
+runs:
+  using: composite
+  steps:
+    - name: Download Droidspaces-OSS
+      uses: ./.github/actions/retry
+      with:
+        command: |
+          git clone --depth=1 https://github.com/ravindu644/Droidspaces-OSS.git
+        attempts: 5
+        delay: 5
+        workdir: ${{ github.workspace }}
+        cleanup: rm -rf Droidspaces-OSS
+
+    - name: Pin Droidspaces-OSS (optional)
+      shell: bash
+      working-directory: ${{ github.workspace }}
+      run: |
+        if [ -n "${{ inputs.droidspaces_commit }}" ]; then
+          git -C Droidspaces-OSS fetch --depth=1 origin "${{ inputs.droidspaces_commit }}"
+          git -C Droidspaces-OSS checkout "${{ inputs.droidspaces_commit }}"
+        fi
+
+    - name: Apply SYSVIPC kABI + POSIX mqueue patches
+      shell: bash
+      working-directory: ${{ github.workspace }}/kernel/common
+      run: |
+        set -euo pipefail
+        P="${{ github.workspace }}/Droidspaces-OSS/Documentation/resources/kernel-patches/GKI/below-kernel-6.12"
+        cp "$P/001.GKI-below-6.12-fix_sysvipc_kabi_6_7_8.patch" ./
+        patch -p1 < 001.GKI-below-6.12-fix_sysvipc_kabi_6_7_8.patch
+        cp "$P/002.5.10_or_lower_use_android_abi_padding_for_posix_mqueue.patch" ./
+        patch -p1 < 002.5.10_or_lower_use_android_abi_padding_for_posix_mqueue.patch
+
+    - name: Enable Kernel Configs
+      uses: ./.github/actions/set-kernel-config
+      with:
+        config_list: |
+          CONFIG_PID_NS=y
+          CONFIG_SYSVIPC=y
+          CONFIG_POSIX_MQUEUE=y
+          CONFIG_IPC_NS=y
+          CONFIG_DEVTMPFS=y
+          CONFIG_BINFMT_MISC=y
+          CONFIG_BINFMT_SCRIPT=y
+          CONFIG_BINFMT_ELF=y
+          CONFIG_USER_NS=y

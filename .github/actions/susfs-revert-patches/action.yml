@@ -1,0 +1,26 @@
+name: 'Revert SUSFS Fake Patches'
+description: 'Undo the temporary android12-5.10 fake patches after the SUSFS patch is applied'
+inputs:
+  sublevel:
+    description: 'Kernel sublevel'
+    required: true
+
+runs:
+  using: "composite"
+  steps:
+    - name: Revert base.c fake patch
+      shell: bash
+      working-directory: ${{ github.workspace }}/kernel/common
+      run: |
+        if [ "${{ inputs.sublevel }}" -le 43 ]; then
+          echo "Reverting base.c fake patch"
+          sed -i 's/^size_t this_len = min_t(size_t, count, PAGE_SIZE);$/int this_len = min_t(int, count, PAGE_SIZE);/' fs/proc/base.c
+        fi
+
+    - name: Apply show_pad fix
+      shell: bash
+      working-directory: ${{ github.workspace }}/kernel/common
+      run: |
+        if [ "${{ inputs.sublevel }}" -le 209 ]; then
+          sed -i -e 's/goto show_pad;/return 0;/' ./fs/proc/task_mmu.c
+        fi

@@ -1,0 +1,36 @@
+name: 'Setup SUSFS'
+description: 'Clone susfs4ksu and apply the android12-5.10 SUSFS patches'
+inputs:
+  susfs_commit:
+    description: 'SUSFS commit hash (empty = latest on gki-android12-5.10)'
+    required: false
+    default: ""
+  sublevel:
+    description: 'Kernel sublevel'
+    required: true
+  root_flavor:
+    description: 'next'
+    required: false
+    default: ""
+
+runs:
+  using: "composite"
+  steps:
+    - name: Setup SUSFS Branch
+      uses: ./.github/actions/susfs-setup
+      with:
+        susfs_commit: ${{ inputs.susfs_commit }}
+        root_flavor: ${{ inputs.root_flavor }}
+
+    - name: Enable SUSFS Kernel Configs
+      uses: ./.github/actions/susfs-config
+
+    - name: Apply SUSFS Patches
+      uses: ./.github/actions/susfs-patches
+      with:
+        sublevel: ${{ inputs.sublevel }}
+
+    - name: Revert SUSFS Fake Patches
+      uses: ./.github/actions/susfs-revert-patches
+      with:
+        sublevel: ${{ inputs.sublevel }}

@@ -1,0 +1,47 @@
+name: 'Prepare AnyKernel3'
+description: 'Clones the AnyKernel3 base and overlays the Nodexys anykernel/ folder (anykernel.sh + banner)'
+
+inputs:
+  base_repo:
+    description: 'AnyKernel3 base repository'
+    required: false
+    default: 'https://github.com/osm0sis/AnyKernel3.git'
+  base_branch:
+    description: 'AnyKernel3 base branch'
+    required: false
+    default: 'master'
+  brand_name:
+    description: 'Name shown in the flasher banner / kernel.string'
+    required: false
+    default: 'Nodexys'
+
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      env:
+        BRAND: ${{ inputs.brand_name }}
+      run: |
+        set -euo pipefail
+        AK="${{ github.workspace }}/AnyKernel3"
+        rm -rf "$AK"
+
+        n=0
+        until git clone --depth=1 -b "${{ inputs.base_branch }}" "${{ inputs.base_repo }}" "$AK"; do
+          n=$((n+1)); [ "$n" -ge 5 ] && { echo "AnyKernel3 clone failed" >&2; exit 1; }
+          rm -rf "$AK"; sleep 5
+        done
+        rm -rf "$AK/.git" "$AK/.github" "$AK/README.md"
+
+        # Overlay our own files (anykernel.sh, banner, anything else in anykernel/)
+        if [ ! -f "${{ github.workspace }}/anykernel/anykernel.sh" ]; then
+          echo "ERROR: anykernel/anykernel.sh is missing in the repo" >&2
+          exit 1
+        fi
+        cp -a "${{ github.workspace }}/anykernel/." "$AK/"
+
+        # Replace the @BRAND@ token everywhere in the text files we ship
+        for f in "$AK/anykernel.sh" "$AK/banner"; do
+          [ -f "$f" ] && sed -i "s|@BRAND@|${BRAND}|g" "$f"
+        done
+        ls -la "$AK"

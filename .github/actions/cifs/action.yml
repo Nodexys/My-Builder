@@ -1,0 +1,16 @@
+name: 'Setup CIFS Configs'
+description: 'Enable CIFS / network filesystem kernel configs'
+
+runs:
+  using: "composite"
+  steps:
+    - name: Enable CIFS Configs
+      uses: ./.github/actions/set-kernel-config
+      with:
+        config_list: |
+          CONFIG_CIFS=y
+          CONFIG_NETWORK_FILESYSTEMS=y
+          CONFIG_NETFS_SUPPORT=y
+          CONFIG_KEYS=y
+          CONFIG_CIFS_XATTR=y
+          CONFIG_CIFS_POSIX=y

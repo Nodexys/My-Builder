@@ -1,0 +1,70 @@
+name: 'Setup Build Environment'
+description: 'Installs clang (12 or 19), cross binutils, ccache, BTF deps and clones kernel_patches'
+
+inputs:
+  clang_version:
+    description: 'Clang major version: 12 or 19'
+    required: true
+  kernel_patches_repo:
+    description: 'Git URL of the kernel_patches repo (extra patches used by some features)'
+    required: false
+    default: 'https://github.com/WildKernels/kernel_patches.git'
+
+runs:
+  using: composite
+  steps:
+    - name: Install toolchain (clang ${{ inputs.clang_version }})
+      shell: bash
+      env:
+        CV: ${{ inputs.clang_version }}
+      run: |
+        set -euo pipefail
+        [[ "$CV" =~ ^(12|19)$ ]] || { echo "::error::clang_version must be 12 or 19" >&2; exit 1; }
+
+        git config --global user.name "github-actions[bot]"
+        git config --global user.email "github-actions[bot]@users.noreply.github.com"
+
+        sudo apt-get update -qq
+        sudo apt-get install -y -qq bc bison flex libssl-dev libelf-dev dwarves cpio lz4 zstd xz-utils \
+          python3 ccache zip \
+          gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu gcc-arm-linux-gnueabi binutils-arm-linux-gnueabi
+
+        if [ "$CV" = "12" ]; then
+          sudo apt-get install -y -qq clang-12 lld-12 llvm-12
+        else
+          wget -q https://apt.llvm.org/llvm.sh -O /tmp/llvm.sh
+          chmod +x /tmp/llvm.sh
+          sudo /tmp/llvm.sh 19
+          sudo apt-get install -y -qq clang-19 lld-19 llvm-19
+        fi
+        echo "/usr/lib/llvm-${CV}/bin" >> "$GITHUB_PATH"
+        "/usr/lib/llvm-${CV}/bin/clang" --version | head -1
+
+    - name: Configure ccache
+      shell: bash
+      run: |
+        set -euo pipefail
+        mkdir -p /home/runner/.ccache
+        {
+          echo "CCACHE_DIR=/home/runner/.ccache"
+          echo "CCACHE_MAXSIZE=4G"
+          echo "CCACHE_COMPILERCHECK=content"
+          echo "CCACHE_BASEDIR=${{ github.workspace }}"
+          echo "CCACHE_NOHASHDIR=true"
+          echo "CCACHE_COMPRESS=true"
+          echo "CCACHE_COMPRESSLEVEL=3"
+          echo "CCACHE_DIRECT=true"
+          echo "CCACHE_SLOPPINESS=file_macro,time_macros,include_file_mtime,include_file_ctime,pch_defines,system_headers,locale"
+        } >> "$GITHUB_ENV"
+
+    - name: Clone kernel_patches
+      shell: bash
+      run: |
+        set -euo pipefail
+        mkdir -p "${{ github.workspace }}/kernel"
+        rm -rf "${{ github.workspace }}/kernel_patches"
+        n=0
+        until git clone --depth=1 "${{ inputs.kernel_patches_repo }}" "${{ github.workspace }}/kernel_patches"; do
+          n=$((n+1)); [ "$n" -ge 5 ] && { echo "::error::No pude clonar kernel_patches" >&2; exit 1; }
+          rm -rf "${{ github.workspace }}/kernel_patches"; sleep 5
+        done

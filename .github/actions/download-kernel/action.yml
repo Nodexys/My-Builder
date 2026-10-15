@@ -1,0 +1,47 @@
+name: 'Download Kernel Source'
+description: 'Clone the kernel source from GitHub into kernel/common'
+
+inputs:
+  source_repo:
+    description: 'Git URL of the kernel source'
+    required: true
+  source_branch:
+    description: 'Branch (empty = default branch)'
+    required: false
+    default: ''
+
+runs:
+  using: composite
+  steps:
+    - name: Clone kernel source
+      shell: bash
+      env:
+        REPO: ${{ inputs.source_repo }}
+        BRANCH: ${{ inputs.source_branch }}
+      run: |
+        set -euo pipefail
+        mkdir -p "${{ github.workspace }}/kernel"
+        cd "${{ github.workspace }}/kernel"
+        rm -rf common
+        BR=()
+        [ -n "$BRANCH" ] && BR=(-b "$BRANCH")
+        echo "[*] Clonando $REPO (rama: ${BRANCH:-por defecto})"
+        n=0
+        until git clone --depth=1 "${BR[@]}" "$REPO" common; do
+          n=$((n+1))
+          if [ "$n" -ge 4 ]; then
+            echo "::error::No pude clonar $REPO. Revisa la rama; si el repo es privado, hazlo público." >&2
+            exit 1
+          fi
+          rm -rf common; sleep 10
+        done
+
+        for f in Makefile arch/arm64/configs/gki_defconfig; do
+          [ -f "common/$f" ] || { echo "::error::Falta $f en el repo. Debe ser la raíz de un kernel con gki_defconfig." >&2; exit 1; }
+        done
+
+        echo "KERNEL_SOURCE_COMMIT=$(git -C common rev-parse HEAD)" >> "$GITHUB_ENV"
+        SUBLEVEL=$(grep -E '^[[:space:]]*SUBLEVEL[[:space:]]*=' common/Makefile | head -n1 | cut -d= -f2 | tr -d '[:space:]')
+        [[ "$SUBLEVEL" =~ ^[0-9]+$ ]] || { echo "::error::SUBLEVEL inválido: '$SUBLEVEL'" >&2; exit 1; }
+        echo "SUBLEVEL=$SUBLEVEL" >> "$GITHUB_ENV"
+        echo "Kernel 5.10.${SUBLEVEL} listo"

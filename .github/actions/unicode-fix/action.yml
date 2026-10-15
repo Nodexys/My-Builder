@@ -1,0 +1,12 @@
+name: 'Apply Unicode Fix Patch'
+description: 'Unicode bypass fix patch (5.10 variant)'
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Apply Unicode Fix Patch
+      shell: bash
+      working-directory: ${{ github.workspace }}/kernel/common
+      run: |
+        set -euo pipefail
+        patch -p1 --forward < "${{ github.workspace }}/kernel_patches/common/unicode_bypass_fix_6.1-.patch"

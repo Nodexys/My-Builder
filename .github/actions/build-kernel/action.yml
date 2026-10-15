@@ -1,0 +1,47 @@
+name: 'Build Kernel'
+description: 'Builds the kernel Image with plain make + clang and copies it into AnyKernel3'
+
+inputs:
+  clang_version:
+    description: 'Clang major version (12 or 19)'
+    required: true
+  extra_make_args:
+    description: 'Extra arguments for make (optional)'
+    required: false
+    default: ''
+
+runs:
+  using: composite
+  steps:
+    - name: Build Image
+      shell: bash
+      working-directory: ${{ github.workspace }}/kernel/common
+      env:
+        CV: ${{ inputs.clang_version }}
+        EXTRA_MAKE_ARGS: ${{ inputs.extra_make_args }}
+      run: |
+        set -euo pipefail
+        export PATH="/usr/lib/llvm-${CV}/bin:$PATH"
+        clang --version | head -1
+
+        # Evita el sufijo -dirty / hash de git en la versión
+        : > .scmversion
+
+        OUT=/home/runner/out
+        mkdir -p "$OUT"
+        ARGS=(O="$OUT" ARCH=arm64 LLVM=1 LLVM_IAS=1
+              CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_COMPAT=arm-linux-gnueabi-
+              CC="ccache clang" HOSTCC="ccache clang" HOSTCXX="ccache clang++")
+
+        make "${ARGS[@]}" gki_defconfig
+        # shellcheck disable=SC2086
+        make -j"$(nproc)" "${ARGS[@]}" $EXTRA_MAKE_ARGS Image
+
+    - name: Gather Build Artifacts
+      shell: bash
+      run: |
+        set -euo pipefail
+        IMG=/home/runner/out/arch/arm64/boot/Image
+        [ -f "$IMG" ] || { echo "::error::No se generó $IMG" >&2; exit 1; }
+        cp "$IMG" "${{ github.workspace }}/AnyKernel3/Image"
+        ls -lh "${{ github.workspace }}/AnyKernel3/Image"
